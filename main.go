@@ -11,7 +11,7 @@ import "sync"
 import "regexp"
 import "strconv"
 import "time"
-import "os"
+//import "os"
 import "errors"
 
 type partIdentifier struct {
@@ -21,6 +21,10 @@ type partIdentifier struct {
 
 // 10 MB
 const partSize = 10485760
+
+// this is for safety when using the proxy
+// Empty string to disable
+const serverPrefix = "bsweb01.bentonville.k12.ar.us/jamfdistributionpoint"
 
 const secondsAfterLastPeer = 10
 var secondsToStayUp uint = 0
@@ -55,7 +59,11 @@ func main() {
 	go serveData()
 	go serveMetadata()
 	
-	packageLocation := os.Args[1]
+	// wait forever
+	select{}
+	
+	// this was code for a CLI version
+	/*packageLocation := os.Args[1]
 	filename := os.Args[2]
 	
 	outputFile, err := os.Create(filename)
@@ -73,27 +81,27 @@ func main() {
 		secondsToStayUp--
 		time.Sleep(time.Second)
 	}
-	fmt.Println()
+	fmt.Println()*/
 }
 
 // this assumes all partes of the package are already downloaded
 func writePackageData(packageName string, dest io.Writer) error {
-	partsMutex.Lock()
-	defer partsMutex.Unlock()
-	
 	for partNumber := uint(0); true; partNumber++ {
 		partID := partIdentifier {
 			location: packageName,
 			number: partNumber,
 		}
 		
+		partsMutex.Lock()
 		if _, exists := parts[partID]; exists {
 			// next part in sequence exists, write it out
 			_, err := dest.Write(parts[partID])
+			partsMutex.Unlock()
 			if err != nil {
 				return err
 			}
 		} else {
+			partsMutex.Unlock()
 			// next part in sequence does not exist, were done
 			return nil
 		}
@@ -109,15 +117,26 @@ func getPackage(packageLocation string) error {
 		return err
 	}
 	contentLength := response.ContentLength
-	numberOfParts := int(contentLength / partSize)
+	numberOfParts := uint(contentLength / partSize)
 	fmt.Println("There are", numberOfParts, "parts to", packageLocation)
 	
 	// make a "deck" of part numbers
 	// we are only using the key part of a map for this
 	partsToGet := make(map[uint]struct{})
-	for i := 0; i < numberOfParts; i++ {
-		partsToGet[uint(i)] = struct{}{}
-	}
+	partsMutex.Lock() // it's faster to only do this once for this short cpu-bound loop
+		for partNumber := uint(0); partNumber < numberOfParts; partNumber++ {
+			partID := partIdentifier {
+				location: packageLocation,
+				number: partNumber,
+			}
+			
+			if _, exists := parts[partID]; !exists {
+				// we don't already have this part in memory
+				// add it to out to-get list
+				partsToGet[partNumber] = struct{}{}
+			}
+		}
+	partsMutex.Unlock()
 	
 	downloadLoop: for len(partsToGet) > 0 {
 		// try to get stuff from peers
@@ -159,7 +178,7 @@ func getPackage(packageLocation string) error {
 }
 
 func getPartFromPeer(peerAddress string, name string, partNumber uint) error {
-	uri := fmt.Sprintf("http://%s/%s/%d", peerAddress, name, partNumber)
+	uri := fmt.Sprintf("http://%s/parts/%s/%d", peerAddress, name, partNumber)
 	fmt.Println("Downloading part from", uri)
 	responseObj, err := http.Get(uri)
 	if err != nil {
@@ -298,45 +317,77 @@ func whoHas(name string, timeoutMs uint) (responses map[string][]uint, err error
 	return
 }
 
+func partsHandler(response http.ResponseWriter, request *http.Request) {
+	// someone used us as a peer, reset the countdown
+	secondsToStayUp = secondsAfterLastPeer
+	
+	matchParts := regexp.MustCompile("^/parts/(.*)/([0-9]+)$").FindStringSubmatch(request.RequestURI)
+	if len(matchParts) != 3 {
+		// bad request URI
+		response.WriteHeader(http.StatusBadRequest)
+		io.WriteString(response, "Use the path format /parts/example.com/foo.pkg/7 for part 7 of foo.pkg\n")
+		return
+	}
+	
+	partNumber, err := strconv.ParseUint(matchParts[2], 10, 32)
+	if err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	
+	partID := partIdentifier {
+		location: matchParts[1],
+		number: uint(partNumber),
+	}
+	
+	partsMutex.Lock()
+	if data, exists := parts[partID]; exists {
+		partsMutex.Unlock()
+		
+		// send the data from the selected part
+		response.Header().Set("Content-Type", "application/octet-stream")
+		response.Write(data)
+	} else {
+		partsMutex.Unlock()
+		
+		response.WriteHeader(http.StatusNotFound)
+		io.WriteString(response, "Requested part is not avalible on this node (or may not exist)\n")
+	}
+}
+
+func proxyHandler(response http.ResponseWriter, request *http.Request) {
+	matcher := regexp.MustCompile("^/proxy/(" + regexp.QuoteMeta(serverPrefix) + ".*)$")
+	matchParts := matcher.FindStringSubmatch(request.RequestURI)
+	if len(matchParts) != 2 {
+		response.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(response, "Did not satisfy prefix requirement (%s)\n", serverPrefix)
+		return
+	}
+	packageLocation := matchParts[1]
+	
+	// download package
+	err := getPackage(packageLocation)
+	if err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintln(response, err)
+		fmt.Println(err)
+		return
+	}
+	
+	// write it out in order
+	response.Header().Set("Content-Type", "application/octet-stream")
+	err = writePackageData(packageLocation, response)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+}
+
+
 func serveData() {
-	//setup handler
-	http.HandleFunc("/", func(response http.ResponseWriter, request *http.Request) {
-		// someone used us as a peer, reset the countdown
-		secondsToStayUp = secondsAfterLastPeer
-		
-		matchParts := regexp.MustCompile("^/(.*)/([0-9]+)$").FindStringSubmatch(request.RequestURI)
-		if len(matchParts) != 3 {
-			// bad request URI
-			response.WriteHeader(http.StatusBadRequest)
-			io.WriteString(response, "Use the path format /example.com/foo.pkg/7 for part 7 of foo.pkg\n")
-			return
-		}
-		
-		partNumber, err := strconv.ParseUint(matchParts[2], 10, 32)
-		if err != nil {
-			response.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		
-		partID := partIdentifier {
-			location: matchParts[1],
-			number: uint(partNumber),
-		}
-		
-		partsMutex.Lock()
-		if data, exists := parts[partID]; exists {
-			partsMutex.Unlock()
-			
-			// send the data from the selected part
-			response.Header().Set("Content-Type", "application/octet-stream")
-			response.Write(data)
-		} else {
-			partsMutex.Unlock()
-			
-			response.WriteHeader(http.StatusNotFound)
-			io.WriteString(response, "Requested part is not avalible on this node (or may not exist)\n")
-		}
-	})
+	//setup handlers
+	http.HandleFunc("/parts/", partsHandler)
+	http.HandleFunc("/proxy/", proxyHandler)
 	// start serving
 	http.ListenAndServe(":1817", nil)
 }
