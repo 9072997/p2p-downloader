@@ -22,6 +22,9 @@ type partIdentifier struct {
 // 10 MB
 const partSize = 10485760
 
+const secondsAfterLastPeer = 10
+var secondsToStayUp uint = 0
+
 // stolen from stackoverflow 23558425
 // GetLocalIP returns the non loopback local IP of the host
 func getLocalIP() string {
@@ -64,6 +67,13 @@ func main() {
 	
 	err = writePackageData(packageLocation, outputFile)
 	jgh.PanicOnErr(err)
+	
+	for secondsToStayUp > 0 {
+		fmt.Printf("\rStaying up for %02d more second(s) waiting on peers", secondsToStayUp)
+		secondsToStayUp--
+		time.Sleep(time.Second)
+	}
+	fmt.Println()
 }
 
 // this assumes all partes of the package are already downloaded
@@ -291,6 +301,9 @@ func whoHas(name string, timeoutMs uint) (responses map[string][]uint, err error
 func serveData() {
 	//setup handler
 	http.HandleFunc("/", func(response http.ResponseWriter, request *http.Request) {
+		// someone used us as a peer, reset the countdown
+		secondsToStayUp = secondsAfterLastPeer
+		
 		matchParts := regexp.MustCompile("^/(.*)/([0-9]+)$").FindStringSubmatch(request.RequestURI)
 		if len(matchParts) != 3 {
 			// bad request URI
