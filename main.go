@@ -24,7 +24,7 @@ const partSize = 10485760
 
 // this is for safety when using the proxy
 // Empty string to disable
-const serverPrefix = "bsweb01.bentonville.k12.ar.us/jamfdistributionpoint"
+const serverPrefix = "bsweb01.bentonville.k12.ar.us/jamf"
 
 const secondsAfterLastPeer = 10
 var secondsToStayUp uint = 0
@@ -110,14 +110,22 @@ func writePackageData(packageName string, dest io.Writer) error {
 	return errors.New("You got out of an infinite loob with no break?")
 }
 
-func getPackage(packageLocation string) error {
+func getPackage(packageLocation string) (httpStatus int, err error) {
 	// get number of parts
 	response, err := http.Head("http://" + packageLocation)
 	if err != nil {
-		return err
+		return 0, err
+	}
+	if response.StatusCode != 200 {
+		fmt.Println("Remote server returned HTTP status", response.StatusCode)
+		return response.StatusCode, errors.New("Remote server did not return 200")
 	}
 	contentLength := response.ContentLength
 	numberOfParts := uint(contentLength / partSize)
+	if contentLength % partSize > 0 {
+		// there is a small piece at the end
+		numberOfParts++
+	}
 	fmt.Println("There are", numberOfParts, "parts to", packageLocation)
 	
 	// make a "deck" of part numbers
@@ -174,7 +182,7 @@ func getPackage(packageLocation string) error {
 	
 	fmt.Println("Finished with", packageLocation)
 	
-	return nil
+	return 200, nil
 }
 
 func getPartFromPeer(peerAddress string, name string, partNumber uint) error {
@@ -361,14 +369,21 @@ func proxyHandler(response http.ResponseWriter, request *http.Request) {
 	if len(matchParts) != 2 {
 		response.WriteHeader(http.StatusForbidden)
 		fmt.Fprintf(response, "Did not satisfy prefix requirement (%s)\n", serverPrefix)
+		fmt.Printf("Did not satisfy prefix requirement: %s\nprefix is %s\n", request.RequestURI, serverPrefix)
 		return
 	}
 	packageLocation := matchParts[1]
 	
 	// download package
-	err := getPackage(packageLocation)
+	httpStatus, err := getPackage(packageLocation)
 	if err != nil {
-		response.WriteHeader(http.StatusInternalServerError)
+		if httpStatus == 0 {
+			// 0 means we dodn't get a response on the HEAD request
+			response.WriteHeader(http.StatusInternalServerError)
+		} else {
+			// pass through status from remote server
+			response.WriteHeader(httpStatus)
+		}
 		fmt.Fprintln(response, err)
 		fmt.Println(err)
 		return
