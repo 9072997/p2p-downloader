@@ -28,7 +28,11 @@ const minNumPartsForProgress = 5
 const serverPrefix = "bsweb01.bentonville.k12.ar.us/jamf"
 
 const secondsAfterLastPeer = 10
+var secondsToStayUpMutex sync.Mutex
 var secondsToStayUp uint = 0
+
+// seconds between prune attepts
+const partsPruneInterval = 10
 
 // End of config stuff
 
@@ -37,6 +41,7 @@ type partIdentifier struct {
 	number uint
 }
 
+// technically this should have a mutex, but the safety isn't worth it
 var globalStatus = struct {
 	name string
 	numParts uint
@@ -45,6 +50,59 @@ var globalStatus = struct {
 	"Nothing is being downloaded",
 	0,
 	0,
+}
+
+var parts map[partIdentifier][]byte
+var partsMutex sync.Mutex
+func init() {
+	partsMutex.Lock()
+	parts = make(map[partIdentifier][]byte)
+	partsMutex.Unlock()
+}
+
+// we use this to tell weather or not it is safe to clear old parts
+var activeRequests sync.WaitGroup
+
+// TODO mutexes
+func partsCleaner() {
+	for {
+		secondsToStayUpMutex.Lock()
+		if secondsToStayUp >= partsPruneInterval {
+			// peers were active recently
+			secondsToStayUp -= partsPruneInterval
+			secondsToStayUpMutex.Unlock()
+			time.Sleep(time.Second * partsPruneInterval)
+		} else {
+			secondsToStayUpMutex.Unlock()
+			// wait for active requests to finish (with timeout)
+			
+			// make a channel out of a wait group
+			noActiveRequests := make(chan struct{})
+			go func() { // TODO these could pile up
+				activeRequests.Wait()
+				close(noActiveRequests)
+			}()
+			
+			// wait on either channel or timeout
+			select {
+				case <- noActiveRequests: {
+					// no active requests, no peers
+					// (last we checked, up to partsPruneInterval seconds ago)
+					// PRUNE!
+					fmt.Println("No recent activity. Pruneing in-memory parts.")
+					partsMutex.Lock()
+					for key := range parts {
+						delete(parts, key)
+					}
+					partsMutex.Unlock()
+				}
+				case <- time.After(time.Second * partsPruneInterval): {
+					// active requests
+					// we already waited the interval to get here, so nothing to do
+				}
+			}
+		}
+	}
 }
 
 func statusNewPackage(packageName string, numParts uint) {
@@ -89,14 +147,6 @@ func getLocalIP() string {
 		}
 	}
 	return ""
-}
-
-var parts map[partIdentifier][]byte
-var partsMutex sync.Mutex
-func init() {
-	partsMutex.Lock()
-	parts = make(map[partIdentifier][]byte)
-	partsMutex.Unlock()
 }
 
 func main() {
@@ -171,7 +221,9 @@ func getPackage(packageLocation string) (httpStatus int, err error) {
 		numberOfParts++
 	}
 	fmt.Println("There are", numberOfParts, "parts to", packageLocation)
-	statusNewPackage(packageLocation, numberOfParts)
+	
+	// this is for progress. We will decriment it for parts we have locally
+	numPartsToFetch := numberOfParts
 	
 	// make a "deck" of part numbers
 	// we are only using the key part of a map for this
@@ -183,13 +235,19 @@ func getPackage(packageLocation string) (httpStatus int, err error) {
 				number: partNumber,
 			}
 			
-			if _, exists := parts[partID]; !exists {
+			if _, exists := parts[partID]; exists {
+				// one less part to fetch
+				numPartsToFetch--
+			} else {
 				// we don't already have this part in memory
 				// add it to out to-get list
 				partsToGet[partNumber] = struct{}{}
 			}
 		}
 	partsMutex.Unlock()
+	
+	// show the progress bar
+	statusNewPackage(packageLocation, numPartsToFetch)
 	
 	downloadLoop: for len(partsToGet) > 0 {
 		// try to get stuff from peers
@@ -378,7 +436,10 @@ func whoHas(name string, timeoutMs uint) (responses map[string][]uint, err error
 
 func partsHandler(response http.ResponseWriter, request *http.Request) {
 	// someone used us as a peer, reset the countdown
+	secondsToStayUpMutex.Lock()
 	secondsToStayUp = secondsAfterLastPeer
+	secondsToStayUpMutex.Unlock()
+	activeRequests.Add(1)
 	
 	matchParts := regexp.MustCompile("^/parts/(.*)/([0-9]+)$").FindStringSubmatch(request.RequestURI)
 	if len(matchParts) != 3 {
@@ -412,9 +473,13 @@ func partsHandler(response http.ResponseWriter, request *http.Request) {
 		response.WriteHeader(http.StatusNotFound)
 		io.WriteString(response, "Requested part is not avalible on this node (or may not exist)\n")
 	}
+	
+	activeRequests.Done()
 }
 
 func proxyHandler(response http.ResponseWriter, request *http.Request) {
+	activeRequests.Add(1)
+	
 	matcher := regexp.MustCompile("^/proxy/(" + regexp.QuoteMeta(serverPrefix) + ".*)$")
 	matchParts := matcher.FindStringSubmatch(request.RequestURI)
 	if len(matchParts) != 2 {
@@ -447,6 +512,8 @@ func proxyHandler(response http.ResponseWriter, request *http.Request) {
 		fmt.Println(err)
 		return
 	}
+	
+	activeRequests.Done()
 }
 
 func serveData() {

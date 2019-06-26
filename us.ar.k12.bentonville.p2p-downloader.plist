@@ -6,7 +6,7 @@
 	<string>us.ar.k12.bentonville.p2p-downloader</string>
 	
 	<key>Program</key>
-	<string>/Library/p2p-downloader/MacOS/p2p-downloader</string>
+	<string>/Library/p2p-downloader.app/Contents/MacOS/p2p-downloader</string>
 	
 	<key>KeepAlive</key>
 	<true/>
