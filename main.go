@@ -40,9 +40,9 @@ const partsPruneInterval = 10
 const dieToFree = true
 
 // maximum message length for UDP packet
-// default is probably fine
-// NOTE: messages may be up to 2 bytes longer than this, because I'm lazy
-const maxUdpSize = 1400
+// now that we use (0)(1)(2) insted of 0,1,2 this shouldn't be an issue
+// NOTE: messages may be a fiew bytes longer than this, because I'm lazy
+const maxUdpSize = 99999
 
 // End of config stuff
 
@@ -426,7 +426,7 @@ func whoHas(name string, timeoutMs uint) (responses map[string][]uint, err error
 		buf := make([]byte, 1024)
 		//LOGfmt.Println("Waiting for response")
 		length, serverAddr, err := rxSocket.ReadFromUDP(buf)
-		responseBytes := buf[0:length]
+		message := buf[0:length]
 		if err != nil && err.(net.Error).Timeout() {
 			err = nil
 			break
@@ -438,12 +438,10 @@ func whoHas(name string, timeoutMs uint) (responses map[string][]uint, err error
 		//LOGfmt.Printf("Got response '%s' from %v\n", response, serverAddr)
 		
 		// parse response
-		// strip leading and trailing commas that happen because of packet splitting
-		// also convert to string
-		response := strings.Trim(string(responseBytes), ",")
-		partNumberStrings := strings.Split(response, ",")
+		partNumberStrings := regexp.MustCompile(`\([0-9]+\)`).FindAllString(string(message), -1)
 		var partNumbers []uint
 		for _, partNumberString := range partNumberStrings {
+			partNumberString = strings.Trim(partNumberString, "()")
 			var partNumber uint64
 			partNumber, err = strconv.ParseUint(partNumberString, 10, 32)
 			if err != nil {
@@ -564,7 +562,7 @@ func serveData() {
 
 func serveMetadata() {
 	// any address at port 1817
-	listenPort, err := net.ResolveUDPAddr("udp",":1817")
+	listenPort, err := net.ResolveUDPAddr("udp", ":1817")
 	jgh.PanicOnErr(err)
 	
 	// Now listen at selected port
@@ -595,22 +593,20 @@ func serveMetadata() {
 		
 		// if we have anything avalible
 		if len(avaliblePartNumbers) > 0 {
-			// make a csv line of the parts we have
-			csv := ""
+			// make a line of the parts we have
+			message := ""
 			for _, partNumber := range avaliblePartNumbers {
 				// rather than handle multipacket messages
 				// just send a random subset of what we have
-				if len(csv) >= maxUdpSize {
+				if len(message) >= maxUdpSize {
 					break
 				}
-				csv += fmt.Sprint(partNumber)
-				csv += ","
+				message += fmt.Sprintf("(%d)", partNumber)
 			}
-			csv = strings.TrimSuffix(csv, ",")
 			
 			// send that back as a udp response
 			//LOGfmt.Printf("Sending response '%s' to %v\n", csv, clientAddr)
-			socket.WriteToUDP([]byte(csv), clientAddr)
+			socket.WriteToUDP([]byte(message), clientAddr)
 		}
 	}
 }
