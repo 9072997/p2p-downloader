@@ -15,6 +15,7 @@ import "os/exec"
 import "os"
 import "errors"
 import "path/filepath"
+import "runtime"
 
 // 10 MB
 const partSize = 10485760
@@ -27,12 +28,21 @@ const minNumPartsForProgress = 5
 // Empty string to disable
 const serverPrefix = "bsweb01.bentonville.k12.ar.us/jamf"
 
-const secondsAfterLastPeer = 10
+const secondsAfterLastPeer = 600
 var secondsToStayUpMutex sync.Mutex
 var secondsToStayUp uint = 0
 
 // seconds between prune attepts
 const partsPruneInterval = 10
+
+// if we are managed by launchd, we can take the extreem aproach to
+// freeing memory and just die. Launchd will restart us
+const dieToFree = true
+
+// maximum message length for UDP packet
+// default is probably fine
+// NOTE: messages may be up to 2 bytes longer than this, because I'm lazy
+const maxUdpSize = 1400
 
 // End of config stuff
 
@@ -63,7 +73,6 @@ func init() {
 // we use this to tell weather or not it is safe to clear old parts
 var activeRequests sync.WaitGroup
 
-// TODO mutexes
 func partsCleaner() {
 	for {
 		secondsToStayUpMutex.Lock()
@@ -89,16 +98,28 @@ func partsCleaner() {
 					// no active requests, no peers
 					// (last we checked, up to partsPruneInterval seconds ago)
 					// PRUNE!
-					fmt.Println("No recent activity. Pruneing in-memory parts.")
+					didSomething := false
 					partsMutex.Lock()
 					for key := range parts {
+						// truely freeing memory is hard, just let launchd restart us
+						if dieToFree {
+							fmt.Println("Dieing to free memory")
+							os.Exit(2)
+						}
 						delete(parts, key)
+						didSomething = true
 					}
 					partsMutex.Unlock()
+					if didSomething {
+						fmt.Println("Cleaned in-memory parts")
+					}
+					runtime.GC()
+					time.Sleep(time.Second * partsPruneInterval)
 				}
 				case <- time.After(time.Second * partsPruneInterval): {
 					// active requests
 					// we already waited the interval to get here, so nothing to do
+					fmt.Println("Can't clean parts (active requests)")
 				}
 			}
 		}
@@ -152,6 +173,7 @@ func getLocalIP() string {
 func main() {
 	go serveData()
 	go serveMetadata()
+	go partsCleaner()
 	
 	// wait forever
 	select{}
@@ -404,7 +426,7 @@ func whoHas(name string, timeoutMs uint) (responses map[string][]uint, err error
 		buf := make([]byte, 1024)
 		//LOGfmt.Println("Waiting for response")
 		length, serverAddr, err := rxSocket.ReadFromUDP(buf)
-		response := buf[0:length]
+		responseBytes := buf[0:length]
 		if err != nil && err.(net.Error).Timeout() {
 			err = nil
 			break
@@ -416,7 +438,10 @@ func whoHas(name string, timeoutMs uint) (responses map[string][]uint, err error
 		//LOGfmt.Printf("Got response '%s' from %v\n", response, serverAddr)
 		
 		// parse response
-		partNumberStrings := strings.Split(string(response), ",")
+		// strip leading and trailing commas that happen because of packet splitting
+		// also convert to string
+		response := strings.Trim(string(responseBytes), ",")
+		partNumberStrings := strings.Split(response, ",")
 		var partNumbers []uint
 		for _, partNumberString := range partNumberStrings {
 			var partNumber uint64
@@ -434,12 +459,16 @@ func whoHas(name string, timeoutMs uint) (responses map[string][]uint, err error
 	return
 }
 
-func partsHandler(response http.ResponseWriter, request *http.Request) {
-	// someone used us as a peer, reset the countdown
+// reset the timer for peer activity
+func peerActivity() {
 	secondsToStayUpMutex.Lock()
 	secondsToStayUp = secondsAfterLastPeer
 	secondsToStayUpMutex.Unlock()
+}
+
+func partsHandler(response http.ResponseWriter, request *http.Request) {
 	activeRequests.Add(1)
+	defer activeRequests.Done()
 	
 	matchParts := regexp.MustCompile("^/parts/(.*)/([0-9]+)$").FindStringSubmatch(request.RequestURI)
 	if len(matchParts) != 3 {
@@ -474,11 +503,13 @@ func partsHandler(response http.ResponseWriter, request *http.Request) {
 		io.WriteString(response, "Requested part is not avalible on this node (or may not exist)\n")
 	}
 	
-	activeRequests.Done()
+	// reset inactivity timer
+	go peerActivity()
 }
 
 func proxyHandler(response http.ResponseWriter, request *http.Request) {
 	activeRequests.Add(1)
+	defer activeRequests.Done()
 	
 	matcher := regexp.MustCompile("^/proxy/(" + regexp.QuoteMeta(serverPrefix) + ".*)$")
 	matchParts := matcher.FindStringSubmatch(request.RequestURI)
@@ -512,8 +543,6 @@ func proxyHandler(response http.ResponseWriter, request *http.Request) {
 		fmt.Println(err)
 		return
 	}
-	
-	activeRequests.Done()
 }
 
 func serveData() {
@@ -569,6 +598,11 @@ func serveMetadata() {
 			// make a csv line of the parts we have
 			csv := ""
 			for _, partNumber := range avaliblePartNumbers {
+				// rather than handle multipacket messages
+				// just send a random subset of what we have
+				if len(csv) >= maxUdpSize {
+					break
+				}
 				csv += fmt.Sprint(partNumber)
 				csv += ","
 			}
