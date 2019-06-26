@@ -11,11 +11,17 @@ import "sync"
 import "regexp"
 import "strconv"
 import "time"
-//import "os"
+import "os/exec"
+import "os"
 import "errors"
+import "path/filepath"
 
 // 10 MB
 const partSize = 10485760
+
+// the minimum number of parts that must be in a download before we
+// launch the progress bar
+const minNumPartsForProgress = 5
 
 // this is for safety when using the proxy
 // Empty string to disable
@@ -46,6 +52,20 @@ func statusNewPackage(packageName string, numParts uint) {
 	globalStatus.name = matchParts[1]
 	globalStatus.numParts = numParts
 	globalStatus.partsComplete = 0
+	
+	if numParts >= minNumPartsForProgress {
+		// get path to self (progress launcher should be in the same dir)
+		dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+		if err != nil {
+			fmt.Println("Error finding path to self:", err)
+		}
+		
+		// launch progress indicator
+		err = exec.Command(dir + "/launchAsCurrentUser").Start()
+		if err != nil {
+			fmt.Println("Error launching progress indicator:", err)
+		}
+	}
 }
 func statusPartFinished() {
 	if globalStatus.partsComplete < globalStatus.numParts {
@@ -131,7 +151,7 @@ func writePackageData(packageName string, dest io.Writer) error {
 		}
 	}
 	
-	return errors.New("You got out of an infinite loob with no break?")
+	return errors.New("You got out of an infinite loop with no break?")
 }
 
 func getPackage(packageLocation string) (httpStatus int, err error) {
