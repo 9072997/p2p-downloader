@@ -14,11 +14,6 @@ import "time"
 //import "os"
 import "errors"
 
-type partIdentifier struct {
-	location string
-	number uint
-}
-
 // 10 MB
 const partSize = 10485760
 
@@ -28,6 +23,35 @@ const serverPrefix = "bsweb01.bentonville.k12.ar.us/jamf"
 
 const secondsAfterLastPeer = 10
 var secondsToStayUp uint = 0
+
+// End of config stuff
+
+type partIdentifier struct {
+	location string
+	number uint
+}
+
+var globalStatus = struct {
+	name string
+	numParts uint
+	partsComplete uint
+} {
+	"Nothing is being downloaded",
+	0,
+	0,
+}
+
+func statusNewPackage(packageName string, numParts uint) {
+	matchParts := regexp.MustCompile(`([^/.]+)(?:\.[^/]*)?/?$`).FindStringSubmatch(packageName)
+	globalStatus.name = matchParts[1]
+	globalStatus.numParts = numParts
+	globalStatus.partsComplete = 0
+}
+func statusPartFinished() {
+	if globalStatus.partsComplete < globalStatus.numParts {
+		globalStatus.partsComplete++
+	}
+}
 
 // stolen from stackoverflow 23558425
 // GetLocalIP returns the non loopback local IP of the host
@@ -127,6 +151,7 @@ func getPackage(packageLocation string) (httpStatus int, err error) {
 		numberOfParts++
 	}
 	fmt.Println("There are", numberOfParts, "parts to", packageLocation)
+	statusNewPackage(packageLocation, numberOfParts)
 	
 	// make a "deck" of part numbers
 	// we are only using the key part of a map for this
@@ -162,6 +187,9 @@ func getPackage(packageLocation string) (httpStatus int, err error) {
 							// we just downloaded a new part, mark it done
 							delete(partsToGet, partNumber)
 							
+							// update status page
+							statusPartFinished()
+							
 							// check with peers again
 							continue downloadLoop
 						}
@@ -177,6 +205,9 @@ func getPackage(packageLocation string) (httpStatus int, err error) {
 		if err == nil {
 			// we downloaded something, mark it off
 			delete(partsToGet, partNumber)
+			
+			// update status page
+			statusPartFinished()
 		}
 	}
 	
@@ -398,11 +429,19 @@ func proxyHandler(response http.ResponseWriter, request *http.Request) {
 	}
 }
 
-
 func serveData() {
 	//setup handlers
 	http.HandleFunc("/parts/", partsHandler)
 	http.HandleFunc("/proxy/", proxyHandler)
+	http.HandleFunc("/status/name", func(response http.ResponseWriter, request *http.Request) {
+		fmt.Fprintln(response, globalStatus.name)
+	})
+	http.HandleFunc("/status/numParts", func(response http.ResponseWriter, request *http.Request) {
+		fmt.Fprintln(response, globalStatus.numParts)
+	})
+	http.HandleFunc("/status/partsComplete", func(response http.ResponseWriter, request *http.Request) {
+		fmt.Fprintln(response, globalStatus.partsComplete)
+	})
 	// start serving
 	http.ListenAndServe(":1817", nil)
 }
