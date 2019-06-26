@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>us.ar.k12.bentonville.p2p-downloader</string>
+	
+	<key>Program</key>
+	<string>/Library/p2p-downloader/MacOS/p2p-downloader</string>
+	
+	<key>KeepAlive</key>
+	<true/>
+	
+	<key>RunAtLoad</key>
+	<true/>
+</dict>
+</plist>
