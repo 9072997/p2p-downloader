@@ -23,7 +23,7 @@ func MakeSliverStore() (s SliverStore, err error) {
 	}
 	
 	s = SliverStore {
-		folder: tempDir,
+		folder: tempDir + "/",
 	}
 	return s, nil
 }

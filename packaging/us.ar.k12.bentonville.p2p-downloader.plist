@@ -13,5 +13,11 @@
 	
 	<key>RunAtLoad</key>
 	<true/>
+	
+	<key>StandardOutPath</key>
+	<string>/var/log/p2p-downloader.log</string>
+	
+	<key>StandardErrorPath</key>
+	<string>/var/log/p2p-downloader.log</string>
 </dict>
 </plist>
