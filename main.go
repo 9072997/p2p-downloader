@@ -15,7 +15,6 @@ import "os/exec"
 import "os"
 import "errors"
 import "path/filepath"
-import "runtime"
 
 // 10 MB
 const partSize = 10485760
@@ -46,11 +45,6 @@ const maxUdpSize = 99999
 
 // End of config stuff
 
-type partIdentifier struct {
-	location string
-	number uint
-}
-
 // technically this should have a mutex, but the safety isn't worth it
 var globalStatus = struct {
 	name string
@@ -62,68 +56,11 @@ var globalStatus = struct {
 	0,
 }
 
-var parts map[partIdentifier][]byte
-var partsMutex sync.Mutex
+var parts SliverStore
 func init() {
-	partsMutex.Lock()
-	parts = make(map[partIdentifier][]byte)
-	partsMutex.Unlock()
-}
-
-// we use this to tell weather or not it is safe to clear old parts
-var activeRequests sync.WaitGroup
-
-func partsCleaner() {
-	for {
-		secondsToStayUpMutex.Lock()
-		if secondsToStayUp >= partsPruneInterval {
-			// peers were active recently
-			secondsToStayUp -= partsPruneInterval
-			secondsToStayUpMutex.Unlock()
-			time.Sleep(time.Second * partsPruneInterval)
-		} else {
-			secondsToStayUpMutex.Unlock()
-			// wait for active requests to finish (with timeout)
-			
-			// make a channel out of a wait group
-			noActiveRequests := make(chan struct{})
-			go func() { // TODO these could pile up
-				activeRequests.Wait()
-				close(noActiveRequests)
-			}()
-			
-			// wait on either channel or timeout
-			select {
-				case <- noActiveRequests: {
-					// no active requests, no peers
-					// (last we checked, up to partsPruneInterval seconds ago)
-					// PRUNE!
-					didSomething := false
-					partsMutex.Lock()
-					for key := range parts {
-						// truely freeing memory is hard, just let launchd restart us
-						if dieToFree {
-							fmt.Println("Dieing to free memory")
-							os.Exit(2)
-						}
-						delete(parts, key)
-						didSomething = true
-					}
-					partsMutex.Unlock()
-					if didSomething {
-						fmt.Println("Cleaned in-memory parts")
-					}
-					runtime.GC()
-					time.Sleep(time.Second * partsPruneInterval)
-				}
-				case <- time.After(time.Second * partsPruneInterval): {
-					// active requests
-					// we already waited the interval to get here, so nothing to do
-					fmt.Println("Can't clean parts (active requests)")
-				}
-			}
-		}
-	}
+	var err error
+	parts, err = MakeSliverStore()
+	jgh.PanicOnErr(err)
 }
 
 func statusNewPackage(packageName string, numParts uint) {
@@ -173,7 +110,6 @@ func getLocalIP() string {
 func main() {
 	go serveData()
 	go serveMetadata()
-	go partsCleaner()
 	
 	// wait forever
 	select{}
@@ -201,29 +137,9 @@ func main() {
 }
 
 // this assumes all partes of the package are already downloaded
+// this is a legacy wraper function
 func writePackageData(packageName string, dest io.Writer) error {
-	for partNumber := uint(0); true; partNumber++ {
-		partID := partIdentifier {
-			location: packageName,
-			number: partNumber,
-		}
-		
-		partsMutex.Lock()
-		if _, exists := parts[partID]; exists {
-			// next part in sequence exists, write it out
-			_, err := dest.Write(parts[partID])
-			partsMutex.Unlock()
-			if err != nil {
-				return err
-			}
-		} else {
-			partsMutex.Unlock()
-			// next part in sequence does not exist, were done
-			return nil
-		}
-	}
-	
-	return errors.New("You got out of an infinite loop with no break?")
+	return parts.GetSlivers(packageName, dest)
 }
 
 func getPackage(packageLocation string) (httpStatus int, err error) {
@@ -250,14 +166,8 @@ func getPackage(packageLocation string) (httpStatus int, err error) {
 	// make a "deck" of part numbers
 	// we are only using the key part of a map for this
 	partsToGet := make(map[uint]struct{})
-	partsMutex.Lock() // it's faster to only do this once for this short cpu-bound loop
 		for partNumber := uint(0); partNumber < numberOfParts; partNumber++ {
-			partID := partIdentifier {
-				location: packageLocation,
-				number: partNumber,
-			}
-			
-			if _, exists := parts[partID]; exists {
+			if parts.Exists(packageLocation, partNumber) {
 				// one less part to fetch
 				numPartsToFetch--
 			} else {
@@ -266,7 +176,6 @@ func getPackage(packageLocation string) (httpStatus int, err error) {
 				partsToGet[partNumber] = struct{}{}
 			}
 		}
-	partsMutex.Unlock()
 	
 	// show the progress bar
 	statusNewPackage(packageLocation, numPartsToFetch)
@@ -330,15 +239,8 @@ func getPartFromPeer(peerAddress string, name string, partNumber uint) error {
 		return err
 	}
 	
-	partID := partIdentifier {
-		location: name,
-		number: partNumber,
-	}
-	
 	// save data to our global parts map
-	partsMutex.Lock()
-	parts[partID] = response
-	partsMutex.Unlock()
+	parts.Save(name, partNumber, response)
 	
 	//LOGfmt.Println("Finished downloading part", partNumber)
 	
@@ -373,15 +275,8 @@ func getPartFromLocation(name string, partNumber uint, maxSize uint64) error {
 		return err
 	}
 	
-	partID := partIdentifier {
-		location: name,
-		number: partNumber,
-	}
-	
 	// save data to our global parts map
-	partsMutex.Lock()
-	parts[partID] = response
-	partsMutex.Unlock()
+	parts.Save(name, partNumber, response)
 	
 	//LOGfmt.Println("Finished downloading part", partNumber)
 	
@@ -465,9 +360,6 @@ func peerActivity() {
 }
 
 func partsHandler(response http.ResponseWriter, request *http.Request) {
-	activeRequests.Add(1)
-	defer activeRequests.Done()
-	
 	matchParts := regexp.MustCompile("^/parts/(.*)/([0-9]+)$").FindStringSubmatch(request.RequestURI)
 	if len(matchParts) != 3 {
 		// bad request URI
@@ -482,21 +374,13 @@ func partsHandler(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	
-	partID := partIdentifier {
-		location: matchParts[1],
-		number: uint(partNumber),
-	}
-	
-	partsMutex.Lock()
-	if data, exists := parts[partID]; exists {
-		partsMutex.Unlock()
-		
+	location := matchParts[1]
+	data, err := parts.Get(location, uint(partNumber))
+	if err == nil {
 		// send the data from the selected part
 		response.Header().Set("Content-Type", "application/octet-stream")
 		response.Write(data)
 	} else {
-		partsMutex.Unlock()
-		
 		response.WriteHeader(http.StatusNotFound)
 		io.WriteString(response, "Requested part is not avalible on this node (or may not exist)\n")
 	}
@@ -506,9 +390,6 @@ func partsHandler(response http.ResponseWriter, request *http.Request) {
 }
 
 func proxyHandler(response http.ResponseWriter, request *http.Request) {
-	activeRequests.Add(1)
-	defer activeRequests.Done()
-	
 	matcher := regexp.MustCompile("^/proxy/(" + regexp.QuoteMeta(serverPrefix) + ".*)$")
 	matchParts := matcher.FindStringSubmatch(request.RequestURI)
 	if len(matchParts) != 2 {
@@ -581,15 +462,7 @@ func serveMetadata() {
 		desiredPackage := string(buf[0:length])
 		//LOGfmt.Println("Got request for", desiredPackage)
 		
-		// loop over locally avalible parts and see if we have anything
-		var avaliblePartNumbers[] uint
-		partsMutex.Lock()
-		for partID := range parts {
-			if partID.location == desiredPackage {
-				avaliblePartNumbers = append(avaliblePartNumbers, partID.number)
-			}
-		}
-		partsMutex.Unlock()
+		avaliblePartNumbers := parts.List(desiredPackage)
 		
 		// if we have anything avalible
 		if len(avaliblePartNumbers) > 0 {
