@@ -1,5 +1,16 @@
 #!/bin/sh -ex
 
+# install command line build tools, so we get git
+touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress;
+PROD=$(softwareupdate -l |
+	grep "\*.*Command Line" |
+	head -n 1 | awk -F"*" '{print $2}' |
+	sed -e 's/^ *//' |
+	tr -d '\n')
+softwareupdate -i "$PROD" --verbose
+rm /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+sudo xcodebuild -license accept
+
 # install golang
 curl 'https://dl.google.com/go/go1.12.6.darwin-amd64.pkg' >go.pkg
 sudo installer -pkg go.pkg -target /
