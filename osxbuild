@@ -8,16 +8,23 @@ rm go.pkg
 # for running locally, clean build dir
 sudo rm -Rf /tmp/pkgroot ||:
 
+# this plist launches the proxy on startup
 sudo mkdir -p /tmp/pkgroot/Library/LaunchDaemons
 sudo cp packaging/us.ar.k12.bentonville.p2p-downloader.plist /tmp/pkgroot/Library/LaunchDaemons/
 
+# build progress bar app file
+# all our other stuff also goes in here, for simplicity
 sudo osacompile -o p2p-download-progressbar.app packaging/p2p-download-progressbar.applescript
 sudo mv p2p-download-progressbar.app /tmp/pkgroot/Library/p2p-downloader.app
 
-sudo go get . ||:
-sudo go build -o p2p-downloader
-sudo mv p2p-downloader /tmp/pkgroot/Library/p2p-downloader.app/Contents/MacOS/
+# build binary
+go get . ||:
+go build -o p2p-downloader
+sudo cp p2p-downloader /tmp/pkgroot/Library/p2p-downloader.app/Contents/MacOS/
+rm p2p-downloader
 
+# script called by proxy to run the progress bar as the console user
 sudo cp packaging/launchAsCurrentUser /tmp/pkgroot/Library/p2p-downloader.app/Contents/MacOS/
 
+# build pkg file
 sudo pkgbuild --root /tmp/pkgroot --identifier us.ar.k12.bentonville.p2p-downloader p2p-downloader.pkg
