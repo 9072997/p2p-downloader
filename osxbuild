@@ -18,10 +18,9 @@ sudo osacompile -o p2p-download-progressbar.app packaging/p2p-download-progressb
 sudo mv p2p-download-progressbar.app /tmp/pkgroot/Library/p2p-downloader.app
 
 # build binary
-go get . ||:
-go build -o p2p-downloader
-sudo cp p2p-downloader /tmp/pkgroot/Library/p2p-downloader.app/Contents/MacOS/
-rm p2p-downloader
+sudo /usr/local/go/bin/go get . ||:
+sudo /usr/local/go/bin/go build -o p2p-downloader
+sudo mv p2p-downloader /tmp/pkgroot/Library/p2p-downloader.app/Contents/MacOS/
 
 # script called by proxy to run the progress bar as the console user
 sudo cp packaging/launchAsCurrentUser /tmp/pkgroot/Library/p2p-downloader.app/Contents/MacOS/
