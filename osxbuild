@@ -1,0 +1,23 @@
+#!/bin/sh -ex
+
+# install golang
+curl 'https://dl.google.com/go/go1.12.6.darwin-amd64.pkg' >go.pkg
+sudo installer -pkg go.pkg -target /
+rm go.pkg
+
+# for running locally, clean build dir
+sudo rm -Rf /tmp/pkgroot ||:
+
+sudo mkdir -p /tmp/pkgroot/Library/LaunchDaemons
+sudo cp packaging/us.ar.k12.bentonville.p2p-downloader.plist /tmp/pkgroot/Library/LaunchDaemons/
+
+sudo osacompile -o p2p-download-progressbar.app packaging/p2p-download-progressbar.applescript
+sudo mv p2p-download-progressbar.app /tmp/pkgroot/Library/p2p-downloader.app
+
+sudo go get . ||:
+sudo go build -o p2p-downloader
+sudo mv p2p-downloader /tmp/pkgroot/Library/p2p-downloader.app/Contents/MacOS/
+
+sudo cp packaging/launchAsCurrentUser /tmp/pkgroot/Library/p2p-downloader.app/Contents/MacOS/
+
+sudo pkgbuild --root /tmp/pkgroot --identifier us.ar.k12.bentonville.p2p-downloader p2p-downloader.pkg
